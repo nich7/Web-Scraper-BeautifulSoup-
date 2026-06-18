@@ -1,0 +1,65 @@
+name: AI PR Reviewer
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   
+
+      - name: Prepare Diff and Generate AI Review
+        id: ai_review
+        run: |
+          DIFF=$(git diff origin/master...HEAD || git diff HEAD^ HEAD)
+
+          if [ -z "$DIFF" ]; then
+            echo "⚠️ No diff found; skipping AI review."
+            echo "REVIEW<<EOF" >> $GITHUB_ENV
+            echo "No code changes detected — nothing to review." >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          echo "🧠 Sending diff of $(echo "$DIFF" | wc -l) lines to OpenAI..."
+
+          RESPONSE=$(curl -s -X POST "https://api.openai.com/v1/chat/completions" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.OPENAI_API_KEY }}" \
+            -d '{
+              "model": "gpt-4o-mini",
+              "messages": [
+                {"role": "system", "content": "You are a strict and detail-oriented senior code reviewer."},
+                {"role": "user", "content": "Review this code diff for potential improvements, bugs, and readability suggestions. Respond concisely:\n'"$DIFF"'"}
+              ]
+            }')
+
+          REVIEW=$(echo "$RESPONSE" | jq -r '.choices[0].message.content')
+
+          if [ "$REVIEW" = "null" ] || [ -z "$REVIEW" ]; then
+            REVIEW="⚠️ The AI review could not be generated. Please check the workflow logs."
+          fi
+
+          echo "REVIEW<<EOF" >> $GITHUB_ENV
+          echo "$REVIEW" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: process.env.REVIEW
+            })
